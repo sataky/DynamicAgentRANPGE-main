@@ -3,9 +3,11 @@ import json
 import redis
 from redis.backoff import ExponentialBackoff
 from redis.retry import Retry
-from redis.exceptions import (BusyLoadingError, RedisError)
+from redis.exceptions import (BusyLoadingError,RedisError,)
 import threading
+import time
 from typing import Optional, Any
+from azure.identity import DefaultAzureCredential
 from app.logs import logger
 from dotenv import load_dotenv
 
@@ -14,13 +16,14 @@ load_dotenv()
 class RedisService:
     """
     Centralized Redis service for handling all Redis operations across the application.
-    Provides a singleton instance with simple Redis authentication.
+    Provides a singleton instance with Azure authentication and automatic token refresh.
     Thread-safe for multiworker environments.
     """
     
     _instance = None
     _client = None
     _lock = threading.Lock()
+    _token_refresh_lock = threading.Lock()
     
     def __new__(cls):
         """Thread-safe singleton pattern to ensure only one Redis connection."""
@@ -33,51 +36,112 @@ class RedisService:
         return cls._instance
     
     def _initialize(self):
-        """Initialize Redis connection with simple authentication."""
+        """Initialize Redis connection with Azure authentication."""
         if self._client is not None:
             return
             
         # Redis configuration from environment
-        self.redis_host = "redis-14039.c339.eu-west-3-1.ec2.redns.redis-cloud.com"
-        self.redis_port = 14039
-        self.redis_username = "default"
-        self.redis_password = "dSRBWkC4blLQYrGUPwypySKcPTFh6Fhp"
+        self.redis_host = os.getenv("REDIS_HOST")
+        self.redis_port = int(os.getenv("REDIS_PORT"))
+        self.redis_username = os.getenv("REDIS_USERNAME")  
+        
+        if not self.redis_username:
+            raise ValueError("REDIS_USERNAME (Object ID) must be set in environment variables")
+
+        self.credential = DefaultAzureCredential()
+        self.token_expiry = 0
+        self.current_token = None
         
         try:
-            logger.info(f"🌐 RedisService connecting to Redis: {self.redis_host}:{self.redis_port}")
-            
-            retry = Retry(ExponentialBackoff(), 3)
-            self._client = redis.Redis(
-                host=self.redis_host,
-                port=self.redis_port,
-                decode_responses=True,
-                username=self.redis_username,
-                password=self.redis_password,
-                socket_keepalive=True,
-                socket_keepalive_options={},
-                retry_on_timeout=True,
-                retry_on_error=[BusyLoadingError, RedisError],
-                retry=retry
-            )
-            
-            # Test connection
-            self._client.ping()
-            logger.info("✅ RedisService Redis connection successful")
+            logger.info(f"🌐 RedisService connecting to Azure Redis: {self.redis_host}:{self.redis_port}")
+            self._connect_with_fresh_token()
+            logger.info("✅ RedisService Azure Redis connection successful")
 
         except Exception as e:
-            logger.error(f"❌ RedisService Redis connection failed: {str(e)}")
+            logger.error(f"❌ RedisService Azure Redis connection failed: {str(e)}")
             self._client = None
             raise Exception(f"Redis connection failed: {str(e)}")
     
+    def _get_fresh_token(self) -> str:
+        """Get a fresh Azure token for Redis authentication."""
+        try:
+            token_response = self.credential.get_token("https://redis.azure.com/.default")
+            self.current_token = token_response.token
+            self.token_expiry = token_response.expires_on
+            logger.debug("🔄 Redis token refreshed successfully")
+            return self.current_token
+        except Exception as e:
+            logger.error(f"❌ Failed to get Redis token: {str(e)}")
+            raise
+    
+    def _connect_with_fresh_token(self):
+        """Connect to Redis with a fresh token."""
+        token = self._get_fresh_token()
+        retry = Retry(ExponentialBackoff(), 3)
+        self._client = redis.Redis(
+            host=self.redis_host,
+            port=self.redis_port,
+            ssl=True,
+            decode_responses=True,
+            username=self.redis_username,
+            password=token,
+            socket_keepalive=True,
+            socket_keepalive_options={},
+            retry_on_timeout=True,
+            retry_on_error=[BusyLoadingError, RedisError],
+            retry=retry
+        )
+        
+        # Test connection
+        self._client.ping()
+    
+    def _is_token_expired(self) -> bool:
+        """Check if the current token will expire soon (within 3 minutes)."""
+        if not self.token_expiry:
+            return True
+        
+        current_time = time.time()
+        # Check if token expires within 3 minutes (180 seconds)
+        return (self.token_expiry - current_time) <= 180
+    
+    def _refresh_auth_if_needed(self):
+        """Refresh authentication if token is about to expire."""
+        if self._is_token_expired():
+            with self._token_refresh_lock:
+                # Double-check after acquiring lock
+                if self._is_token_expired():
+                    try:
+                        logger.info("🔄 Refreshing Redis authentication...")
+                        fresh_token = self._get_fresh_token()
+                        
+                        # Send AUTH command with fresh token
+                        # Add small random delay to stagger AUTH commands
+                        import random
+                        time.sleep(random.uniform(0.1, 0.5))
+                        
+                        self._client.execute_command("AUTH", self.redis_username, fresh_token)
+                        logger.info("✅ Redis authentication refreshed successfully")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Failed to refresh Redis authentication: {str(e)}")
+                        # Try to reconnect with fresh token
+                        try:
+                            self._connect_with_fresh_token()
+                        except Exception as reconnect_error:
+                            logger.error(f"❌ Failed to reconnect to Redis: {str(reconnect_error)}")
+                            raise
+    
     @property
     def client(self) -> Optional[redis.Redis]:
-        """Get the Redis client instance."""
+        """Get the Redis client instance with automatic token refresh."""
+        self._refresh_auth_if_needed()
         return self._client
     
     def is_connected(self) -> bool:
         """Check if Redis connection is active."""
         try:
             if self._client:
+                self._refresh_auth_if_needed()
                 self._client.ping()
                 return True
         except Exception as e:
