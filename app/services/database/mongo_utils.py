@@ -46,7 +46,7 @@ class AsyncMongoDBService:
         self.tools = self.db.tools
         self.topics = self.db.topics
         self.users = self.chat_db.users
-        self.conversations = self.chat_db.conversations2
+        self.conversations = self.chat_db.conversations
         self.messages = self.chat_db.messages
         self.memories = self.chat_db.memories
         
