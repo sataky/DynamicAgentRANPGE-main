@@ -72,8 +72,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://ranpge-test.skema.edu",
-        "https://bottomup-ranpge-test.skema.edu"
+        "https://ranpge.skema.edu",
+        "https://app-ranpge-bottomup-api-prd-01-a8gkfrbedjb9erhr.westeurope-01.azurewebsites.net"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -86,7 +86,7 @@ app.include_router(auth_routes.router)
 app.include_router(chat_routes.router)
 app.include_router(users_routes.router)
 
-@app.get("/health")
+@app.get("/")
 async def health():
     """
     Health check endpoint to verify the application is running.
