@@ -7,7 +7,7 @@ PORT=${PORT:-8000}
 # Launch Gunicorn + Uvicorn workers
 gunicorn main:app \
   --chdir app \
-  --bind 0.0.0.0:$PORT \
+  --bind 0.0.0.0:8080 \
   --workers 1 \
   --worker-class uvicorn.workers.UvicornWorker \
   --timeout 300
