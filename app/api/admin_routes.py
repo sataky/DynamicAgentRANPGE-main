@@ -11,7 +11,14 @@ When an admin uploads a file:
 """
 
 import os, shutil, datetime, tempfile, asyncio
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, status, File, Depends
+from app.services.external.auth_service import auth_service
+from app.repositories.admin_repository import AdminCollection
+from app.services.admin.admin_analytics_service import admin_analytics_service
+from app.models.schemas.admin_models import (
+    GlobalStatsResponse, EvaluationStatsResponse, CourseStatsResponse,
+    InsightsResponse, AdminDashboardRequest, DashboardResponse
+)
 from app.utils.parse_utils import file_to_documents
 from app.state import clear_course_cache
 from app.services.database.indexing_service import summarize_text, get_or_create_index
@@ -28,6 +35,50 @@ router = APIRouter(
     tags=["admin"]
 )
 
+
+async def verify_admin_access(current_user_id: str = Depends(auth_service.get_current_user)) -> str:
+    """
+    Verify current user has admin access.
+    
+    Args:
+        current_user_id: Current authenticated user ID
+        
+    Returns:
+        User ID if admin access granted
+        
+    Raises:
+        HTTPException: If user is not admin
+    """
+    try:
+        service = await get_service()
+        user = await service.get_user_by_id(current_user_id)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        admin_collection = AdminCollection()
+        is_admin = await admin_collection.is_admin(user["email"])
+        
+        if not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required"
+            )
+        
+        return current_user_id
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying admin access: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication verification failed"
+        )
+    
 
 @router.post("/upload/{program}/{level}/{course}/{module}/{module_order}")
 async def admin_upload_file(
@@ -309,4 +360,220 @@ async def get_courses_with_ordered_modules(program: str, level: str):
         raise HTTPException(
             status_code=500, 
             detail="An error occurred while retrieving ordered courses"
+        )
+
+
+@router.get("/dashboard/global", response_model=GlobalStatsResponse)
+async def get_global_stats(_: str = Depends(verify_admin_access)):
+    """
+    Get global user statistics for admin dashboard.
+    """
+    try:
+        user_stats = await admin_analytics_service.get_user_stats()
+        
+        return GlobalStatsResponse(
+            user_stats=user_stats,
+            timestamp=datetime.datetime.now().isoformat(),
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting global stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve global statistics"
+        )
+
+@router.get("/dashboard/evaluations", response_model=EvaluationStatsResponse)
+async def get_evaluation_stats(_: str = Depends(verify_admin_access)):
+    """
+    Get evaluation statistics by type.
+    """
+    try:
+        evaluation_stats = await admin_analytics_service.get_evaluation_stats()
+        
+        return EvaluationStatsResponse(
+            evaluation_stats=evaluation_stats,
+            timestamp=datetime.datetime.now().isoformat(),
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting evaluation stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve evaluation statistics"
+        )
+
+@router.get("/dashboard/courses", response_model=CourseStatsResponse)
+async def get_course_stats(
+    limit: int = 10,
+    _: str = Depends(verify_admin_access)
+):
+    """
+    Get course statistics and rankings.
+    
+    Args:
+        limit: Maximum number of courses to return (default: 10, max: 50)
+    """
+    try:
+        # Validate limit
+        limit = min(max(limit, 1), 50)
+        
+        course_stats = await admin_analytics_service.get_course_stats(limit_courses=limit)
+        
+        return CourseStatsResponse(
+            course_stats=course_stats,
+            timestamp=datetime.datetime.now().isoformat(),
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting course stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve course statistics"
+        )
+
+@router.get("/dashboard/insights", response_model=InsightsResponse)
+async def get_insights(_: str = Depends(verify_admin_access)):
+    """
+    Get insights and alerts for admin dashboard.
+    """
+    try:
+        user_stats = await admin_analytics_service.get_user_stats()
+        evaluation_stats = await admin_analytics_service.get_evaluation_stats()
+        course_stats = await admin_analytics_service.get_course_stats()
+        
+        insights_data = await admin_analytics_service.generate_insights(
+            user_stats, evaluation_stats, course_stats
+        )
+        
+        return InsightsResponse(
+            insights_data=insights_data,
+            timestamp=datetime.datetime.now().isoformat(),
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting insights: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve insights"
+        )
+
+@router.post("/dashboard/complete", response_model=DashboardResponse)
+async def get_complete_dashboard(
+    request: AdminDashboardRequest,
+    _: str = Depends(verify_admin_access)
+):
+    """
+    Get complete dashboard data with optional filters.
+    
+    Args:
+        request: Dashboard request with filters and options
+    """
+    try:
+        dashboard_data = await admin_analytics_service.get_dashboard_data(
+            filters=request.filters,
+            include_insights=request.include_insights,
+            limit_courses=request.limit_courses
+        )
+        
+        return dashboard_data
+        
+    except Exception as e:
+        logger.error(f"Error getting complete dashboard: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve dashboard data"
+        )
+
+@router.post("/admin-registry/add")
+async def add_admin_email(
+    email: str,
+    username: str = None,
+    role: str = "admin",
+    #_: str = Depends(verify_admin_access)
+):
+    """
+    Add email to admin registry.
+    
+    Args:
+        email: Email to add to admin registry
+        username: Optional username
+        role: Admin role (admin or super_admin)
+    """
+    try:
+        admin_collection = AdminCollection()
+        admin_id = await admin_collection.add_admin_email(email, username, role)
+        
+        return {
+            "success": True,
+            "message": f"Admin email {email} added successfully",
+            "admin_id": admin_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding admin email: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add admin email: {str(e)}"
+        )
+
+@router.delete("/admin-registry/remove")
+async def remove_admin_email(
+    email: str,
+    _: str = Depends(verify_admin_access)
+):
+    """
+    Remove email from admin registry.
+    
+    Args:
+        email: Email to remove from admin registry
+    """
+    try:
+        admin_collection = AdminCollection()
+        success = await admin_collection.remove_admin_email(email)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Admin email {email} removed successfully"
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Admin email not found"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing admin email: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove admin email: {str(e)}"
+        )
+
+@router.get("/admin-registry/list")
+async def list_admin_emails(_: str = Depends(verify_admin_access)):
+    """
+    List all registered admin emails.
+    """
+    try:
+        admin_collection = AdminCollection()
+        admin_emails = await admin_collection.get_admin_emails()
+        
+        return {
+            "success": True,
+            "admin_emails": admin_emails,
+            "total_admins": len(admin_emails)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing admin emails: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve admin emails"
         )
