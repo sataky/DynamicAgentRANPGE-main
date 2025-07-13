@@ -87,6 +87,7 @@ async def azure_callback(
         error = query_params.get('error')
 
         original_state, frontend_url = decode_state_with_frontend(encoded_state)
+        
         if not frontend_url:
             frontend_url = default_frontend_url
         
@@ -95,7 +96,7 @@ async def azure_callback(
             frontend_error_url = f"{frontend_url}/login?error=azure_auth_failed"
             return RedirectResponse(url=frontend_error_url, status_code=302)
         
-        if not code or not state:
+        if not code or not original_state:
             logger.error("Missing code or state parameter in Azure callback")
             frontend_error_url = f"{frontend_url}/login?error=missing_parameters"
             return RedirectResponse(url=frontend_error_url, status_code=302)
@@ -149,7 +150,8 @@ async def azure_callback(
         raise
     except Exception as e:
         logger.error(f"Error in Azure callback: {str(e)}")
-        frontend_error_url = f"{frontend_url}/login?error=server_error"
+        default_frontend_url = os.getenv("USER_FRONTEND_URL")
+        frontend_error_url = f"{default_frontend_url}/login?error=server_error"
         return RedirectResponse(url=frontend_error_url, status_code=302)
 
 
