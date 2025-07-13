@@ -1,6 +1,6 @@
 from datetime import datetime
 import logging
-from typing import Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union
 
 from app.models.entities.user import UserModel, UserCreate, UserUpdate, UserResponse, AddEvaluationScore, EvaluationScore
 from app.services.database.mongo_utils import get_service
@@ -39,6 +39,33 @@ class UserCollection:
             if "course_scores" not in user:
                 user["course_scores"] = {}
         return user
+
+    async def get_all_users(self) -> List[Dict[str, Any]]:
+        """
+        Get all users from database
+        
+        Returns:
+            List of all user data
+            
+        Raises:
+            UserCollectionError: On retrieval error
+        """
+        try:
+            service = await get_service()
+            users = await service.find_all_users()
+            
+            # Prepare each user response
+            prepared_users = []
+            for user in users:
+                prepared_user = self._prepare_user_response(user)
+                prepared_users.append(prepared_user)
+            
+            logger.debug(f"Retrieved {len(prepared_users)} users")
+            return prepared_users
+            
+        except Exception as e:
+            logger.error(f"Error retrieving all users: {str(e)}")
+            raise UserCollectionError(f"Failed to retrieve users: {str(e)}")
     
     async def create_user(self, user: UserCreate, program: str = "MM", level: str = "M1") -> str:
         """
