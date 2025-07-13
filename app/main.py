@@ -73,7 +73,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://ranpge.skema.edu",
-        "https://app-ranpge-bottomup-api-prd-01-a8gkfrbedjb9erhr.westeurope-01.azurewebsites.net"
+        "https://app-ranpge-bottomup-api-prd-01-a8gkfrbedjb9erhr.westeurope-01.azurewebsites.net",
+        "https://app-ranpge-producer-uix-prd-01-ffg8cqd5embjh9g0.westeurope-01.azurewebsites.net"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
