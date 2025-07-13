@@ -1,4 +1,7 @@
 import os
+import json
+import base64
+from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request , Depends
 from fastapi.responses import JSONResponse, RedirectResponse
 from app.models.schemas.auth_models import (
@@ -23,12 +26,28 @@ async def get_user_collection() -> UserCollection:
     """
     return UserCollection()
 
+def determine_frontend_url(referer: str, origin: str) -> str:
+    user_frontend_url = os.getenv("USER_FRONTEND_URL")
+    admin_frontend_url = os.getenv("ADMIN_FRONTEND_URL")
+    
+    source = origin or referer
+    
+    if admin_frontend_url and admin_frontend_url in source:
+        return admin_frontend_url
+    
+    return user_frontend_url
 
 @router.get("/azure/login")
-async def azure_login():
+async def azure_login(request: Request):
     """Initiate Azure AD OAuth2 authentication flow."""
     try:
+        referer = request.headers.get("referer", "")
+        origin = request.headers.get("origin", "")
+        
         auth_url, state = azure_auth_service.generate_authorization_url()
+
+        state_frontend_mapping[state] = frontend_url
+        
         logger.info(f"Redirecting to Azure AD for authentication with state: {state}")
         return RedirectResponse(url=auth_url, status_code=302)
         
@@ -45,12 +64,17 @@ async def azure_callback(
     """Handle Azure AD OAuth2 callback and complete authentication."""
     try:
         # Get frontend URL from environment variable
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        frontend_url = os.getenv("USER_FRONTEND_URL")
         
         query_params = dict(request.query_params)
         code = query_params.get('code')
         state = query_params.get('state')
         error = query_params.get('error')
+
+        frontend_url = state_frontend_mapping.get(state, default_frontend_url)
+
+        if state in state_frontend_mapping:
+            del state_frontend_mapping[state]
         
         if error:
             logger.error(f"Azure AD returned error: {error}")
