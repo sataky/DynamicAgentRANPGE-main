@@ -1,3 +1,5 @@
+import json
+import base64
 import secrets
 import requests
 from typing import Optional, Dict, Any, Tuple
@@ -27,6 +29,24 @@ class AzureAuthService:
         self.graph_endpoint = "https://graph.microsoft.com/v1.0"
         
         self._state_store = {}
+
+    def decode_state_if_encoded(self, state: str) -> str:
+        """
+        Decode state if it's encoded, otherwise return original state.
+        
+        Args:
+            state: State parameter (could be encoded or original)
+            
+        Returns:
+            Original state for validation
+        """
+        try:
+            state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+            if isinstance(state_data, dict) and 'original_state' in state_data:
+                return state_data['original_state']
+        except:
+            pass
+        return state
     
     def generate_authorization_url(self, prompt: str = "select_account") -> Tuple[str, str]:
         """
@@ -56,29 +76,30 @@ class AzureAuthService:
         logger.info(f"Generated authorization URL with state: {state}")
         
         return auth_url, state
-    
+
     def validate_state(self, state: str) -> bool:
         """
         Validate state parameter to prevent CSRF attacks.
         
         Args:
-            state: State parameter received from callback
+            state: State parameter received from callback (could be encoded)
             
         Returns:
             True if state is valid, False otherwise
         """
-        is_valid = state in self._state_store
+        original_state = self.decode_state_if_encoded(state)
+        is_valid = original_state in self._state_store
         if is_valid:
-            del self._state_store[state]
+            del self._state_store[original_state]
         return is_valid
-    
+        
     async def exchange_code_for_tokens(self, code: str, state: str) -> Optional[Dict[str, Any]]:
         """
         Exchange authorization code for access and ID tokens.
         
         Args:
             code: Authorization code received from Azure AD
-            state: State parameter for validation
+            state: State parameter for validation (could be encoded)
             
         Returns:
             Token response dict or None if exchange failed
