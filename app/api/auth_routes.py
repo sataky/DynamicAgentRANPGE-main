@@ -37,18 +37,33 @@ def determine_frontend_url(referer: str, origin: str) -> str:
     
     return user_frontend_url
 
+def encode_state_with_frontend(original_state: str, frontend_url: str) -> str:
+    state_data = {
+        "original_state": original_state,
+        "frontend_url": frontend_url
+    }
+    return base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
+def decode_state_with_frontend(encoded_state: str) -> tuple:
+    try:
+        state_data = json.loads(base64.urlsafe_b64decode(encoded_state.encode()).decode())
+        return state_data["original_state"], state_data["frontend_url"]
+    except:
+        return encoded_state, None
+
 @router.get("/azure/login")
 async def azure_login(request: Request):
     """Initiate Azure AD OAuth2 authentication flow."""
     try:
         referer = request.headers.get("referer", "")
         origin = request.headers.get("origin", "")
-        
-        auth_url, state = azure_auth_service.generate_authorization_url()
+        frontend_url = determine_frontend_url(referer, origin)
 
-        state_frontend_mapping[state] = frontend_url
+        auth_url, original_state = azure_auth_service.generate_authorization_url()
+        encoded_state = encode_state_with_frontend(original_state, frontend_url)
+        auth_url = auth_url.replace(f"state={original_state}", f"state={encoded_state}")
         
-        logger.info(f"Redirecting to Azure AD for authentication with state: {state}")
+        logger.info(f"Redirecting to Azure AD for authentication with state: {encoded_state}")
         return RedirectResponse(url=auth_url, status_code=302)
         
     except Exception as e:
@@ -64,17 +79,16 @@ async def azure_callback(
     """Handle Azure AD OAuth2 callback and complete authentication."""
     try:
         # Get frontend URL from environment variable
-        frontend_url = os.getenv("USER_FRONTEND_URL")
+        default_frontend_url = os.getenv("USER_FRONTEND_URL")
         
         query_params = dict(request.query_params)
         code = query_params.get('code')
-        state = query_params.get('state')
+        encoded_state = query_params.get('state')
         error = query_params.get('error')
 
-        frontend_url = state_frontend_mapping.get(state, default_frontend_url)
-
-        if state in state_frontend_mapping:
-            del state_frontend_mapping[state]
+        original_state, frontend_url = decode_state_with_frontend(encoded_state)
+        if not frontend_url:
+            frontend_url = default_frontend_url
         
         if error:
             logger.error(f"Azure AD returned error: {error}")
@@ -86,7 +100,7 @@ async def azure_callback(
             frontend_error_url = f"{frontend_url}/login?error=missing_parameters"
             return RedirectResponse(url=frontend_error_url, status_code=302)
         
-        azure_user_info = await azure_auth_service.complete_oauth_flow(code, state)
+        azure_user_info = await azure_auth_service.complete_oauth_flow(code, original_state)
         
         if not azure_user_info:
             logger.error("Failed to complete Azure OAuth flow")
