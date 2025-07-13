@@ -46,6 +46,7 @@ class AsyncMongoDBService:
         self.tools = self.db.tools
         self.topics = self.db.topics
         self.users = self.chat_db.users
+        self.admins = self.chat_db.admins
         self.conversations = self.chat_db.conversations
         self.messages = self.chat_db.messages
         self.memories = self.chat_db.memories
@@ -91,8 +92,10 @@ class AsyncMongoDBService:
             
             try:
                 await self.users.create_index([("email", 1)], unique=True)
+                await self.admins.create_index("email", unique=True)
             except Exception:
                 await self.users.create_index([("email", 1)], unique=False)
+                await self.admins.create_index("email", unique=False)
                 
         except Exception:
             pass
@@ -744,6 +747,58 @@ class AsyncMongoDBService:
         
         return courses
 
+    ### Admin new methods 
+    async def find_admin_by_email(self, email: str) -> Optional[Dict]:
+        """
+        Find admin by email.
+        """
+        return await self.admins.find_one({"email": email})
+
+    async def create_admin(self, admin_data: Dict) -> str:
+        """
+        Create new admin.
+        """
+        result = await self.admins.insert_one(admin_data)
+        return str(result.inserted_id)
+
+    async def find_all_admins(self) -> List[Dict]:
+        """
+        Find all admins in the collection.
+        """
+        cursor = self.admins.find({})
+        admins = await cursor.to_list(length=None)
+        for admin in admins:
+            admin["id"] = str(admin["_id"])
+        return admins
+
+    async def update_admin(self, admin_id: str, update_data: Dict) -> Optional[Dict]:
+        """
+        Update admin information.
+        """
+        if not ObjectId.is_valid(admin_id):
+            return None
+        
+        update_dict = {k: v for k, v in update_data.items() if v is not None}
+        if not update_dict:
+            admin = await self.admins.find_one({"_id": ObjectId(admin_id)})
+            if admin:
+                admin["id"] = str(admin["_id"])
+            return admin
+        
+        update_dict["updated_at"] = datetime.now()
+        
+        result = await self.admins.update_one(
+            {"_id": ObjectId(admin_id)},
+            {"$set": update_dict}
+        )
+        
+        if result.modified_count > 0 or result.matched_count > 0:
+            admin = await self.admins.find_one({"_id": ObjectId(admin_id)})
+            if admin:
+                admin["id"] = str(admin["_id"])
+            return admin
+        return None
+
 
 _service_instance = None
 
@@ -935,3 +990,32 @@ async def get_course_modules_with_order(program: str, level: str) -> Dict[str, L
 async def generate_conversation_id() -> str:
     service = await get_service()
     return service.generate_conversation_id()
+
+### Admins helper functions
+async def find_admin_by_email(email: str) -> Optional[Dict]:
+    """
+    Find admin by email.
+    """
+    service = await get_service()
+    return await service.find_admin_by_email(email)
+
+async def create_admin(admin_data: Dict) -> str:
+    """
+    Create new admin.
+    """
+    service = await get_service()
+    return await service.create_admin(admin_data)
+
+async def find_all_admins() -> List[Dict]:
+    """
+    Find all admins.
+    """
+    service = await get_service()
+    return await service.find_all_admins()
+
+async def update_admin(admin_id: str, update_data: Dict) -> Optional[Dict]:
+    """
+    Update admin information.
+    """
+    service = await get_service()
+    return await service.update_admin(admin_id, update_data)
