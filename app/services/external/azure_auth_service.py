@@ -2,6 +2,9 @@ import json
 import base64
 import secrets
 import requests
+import hmac
+import hashlib
+import time
 from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlencode, parse_qs, urlparse
 import logging
@@ -11,6 +14,7 @@ from app.config import (
     AZURE_TENANT_ID,
     AZURE_REDIRECT_URI
 )
+
 logger = logging.getLogger(__name__)
 
 class AzureAuthService:
@@ -28,7 +32,7 @@ class AzureAuthService:
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.graph_endpoint = "https://graph.microsoft.com/v1.0"
         
-        self._state_store = {}
+        self.state_secret = (self.client_secret + "SKEMA_STATE_SECRET").encode()
 
     def decode_state_if_encoded(self, state: str) -> str:
         """
@@ -48,6 +52,62 @@ class AzureAuthService:
             pass
         return state
     
+    def _create_signed_state(self) -> str:
+        """Create cryptographically signed state that can be validated without storage."""
+        timestamp = int(time.time())
+        nonce = secrets.token_urlsafe(16)
+        
+        payload = {
+            "ts": timestamp,
+            "nonce": nonce
+        }
+        
+        payload_json = json.dumps(payload, separators=(',', ':'))
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip('=')
+        
+        signature = hmac.new(
+            self.state_secret,
+            payload_b64.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return f"{payload_b64}.{signature}"
+    
+    def _validate_signed_state(self, state: str, max_age_seconds: int = 900) -> bool:
+        """Validate cryptographically signed state."""
+        try:
+            if '.' not in state:
+                return False
+                
+            payload_b64, received_signature = state.split('.', 1)
+            
+            expected_signature = hmac.new(
+                self.state_secret,
+                payload_b64.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if not hmac.compare_digest(received_signature, expected_signature):
+                return False
+            
+            payload_b64_padded = payload_b64 + '=' * (4 - len(payload_b64) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64_padded).decode()
+            payload = json.loads(payload_json)
+            
+            timestamp = payload.get('ts')
+            if not timestamp:
+                return False
+                
+            age = time.time() - timestamp
+            if age > max_age_seconds:
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.warning(f"State validation error: {str(e)}")
+            return False
+    
     def generate_authorization_url(self, prompt: str = "select_account") -> Tuple[str, str]:
         """
         Generate Azure AD authorization URL for OAuth2 flow.
@@ -56,9 +116,9 @@ class AzureAuthService:
             prompt: Azure AD prompt parameter ('select_account', 'none', 'login', 'consent')
             
         Returns:
-            Tuple of (authorization_url, state) where state should be stored for validation
+            Tuple of (authorization_url, state) where state is cryptographically signed
         """
-        state = secrets.token_urlsafe(32)
+        state = self._create_signed_state()
         
         params = {
             "client_id": self.client_id,
@@ -72,7 +132,6 @@ class AzureAuthService:
         
         auth_url = f"{self.authority}/oauth2/v2.0/authorize?" + urlencode(params)
         
-        self._state_store[state] = True
         logger.info(f"Generated authorization URL with state: {state}")
         
         return auth_url, state
@@ -88,10 +147,7 @@ class AzureAuthService:
             True if state is valid, False otherwise
         """
         original_state = self.decode_state_if_encoded(state)
-        is_valid = original_state in self._state_store
-        if is_valid:
-            del self._state_store[original_state]
-        return is_valid
+        return self._validate_signed_state(original_state, max_age_seconds=900)
         
     async def exchange_code_for_tokens(self, code: str, state: str) -> Optional[Dict[str, Any]]:
         """
